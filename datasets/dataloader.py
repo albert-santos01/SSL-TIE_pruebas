@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 import os
 import cv2
 import json
@@ -39,7 +40,158 @@ class GaussianBlur(object):
         x = x.filter(ImageFilter.GaussianBlur(radius=sigma))
         return x
 
+### Albert:
+class AVDataset(ABC, Dataset):
+    def __init__(self, args, mode='train', transforms=None):
+        super(AVDataset, self).__init__()
+        self.args = args
+        self.mode = mode
+        self.transforms = transforms
+        self.count = 0
+        self.imgSize = 224
+        self.AmplitudeToDB = audio_T.AmplitudeToDB()
+        self.audio_path = None
+        self.video_path = None
+        self._init_transform()
+        self._init_atransform()
+        self.video_files = []
 
+    def _init_transform(self):
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+
+        if self.mode == 'train':
+
+            if self.args.img_aug == 'moco_v1':
+                augmentation = [
+                    transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
+                    transforms.RandomGrayscale(p=0.2),
+                    transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    normalize
+                ]
+
+                self.img_transform = transforms.Compose(augmentation)
+
+            elif self.args.img_aug == 'moco_v2':
+                augmentation = [
+                    transforms.RandomResizedCrop(224, scale=(0.3, 1.)),
+                    transforms.RandomApply([
+                        transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
+                    ], p=0.8),
+                    transforms.RandomGrayscale(p=0.2),
+                    transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    normalize
+                ]
+                
+                self.img_transform = transforms.Compose(augmentation)
+        else:
+            self.img_transform = transforms.Compose([
+                transforms.Resize(self.imgSize, Image.BICUBIC),
+                transforms.CenterCrop(self.imgSize),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std)])            
+
+    def _init_atransform(self):
+        # self.aid_transform = transforms.Compose([transforms.ToTensor(),transforms.Normalize(mean=[0.0], std=[12.0])])
+        self.aid_transform = transforms.Compose([transforms.ToTensor()])
+ 
+
+    def _load_frame(self, path):
+        img = Image.open(path).convert('RGB')
+        return img
+
+    @abstractmethod
+    def __len__(self):
+        pass
+    
+    @abstractmethod
+    def _get_file(self, index):
+        pass
+
+    @abstractmethod
+    def _get_video(self,file):
+        pass
+
+    @abstractmethod
+    def _get_audio(self,file):
+        pass
+
+    
+    def __getitem__(self, index):
+        # file= self.video_files[index]
+        file = self._get_file(index)
+        frame_path = self._get_video(file)
+        audio_path = self._get_audio(file)
+
+        frame = self.img_transform(self._load_frame( frame_path ))
+        frame_ori = np.array(self._load_frame(frame_path))
+
+        samples, samplerate = torchaudio.load(audio_path)
+
+        if samples.shape[1] < samplerate * 10:
+            n = int(samplerate * 10 / samples.shape[1]) + 1
+            samples = samples.repeat(1, n)
+
+        samples = samples[...,:samplerate*10]
+
+
+
+        spectrogram  =  audio_T.MelSpectrogram(
+                sample_rate=samplerate,
+                n_fft=512,
+                hop_length=239, 
+                n_mels=257,
+                normalized=True
+            )(samples)
+        
+        if (self.args.aud_aug=='SpecAug') and (self.mode=='train') and (random.random() < 0.8):
+            raise ValueError('Never get here')
+            maskings = nn.Sequential(
+                audio_T.TimeMasking(time_mask_param=180),
+                audio_T.FrequencyMasking(freq_mask_param=35)
+                )
+            spectrogram = maskings(spectrogram)
+
+        spectrogram = self.AmplitudeToDB(spectrogram)
+             
+
+        return frame, spectrogram, 'samples', file, torch.tensor(frame_ori)
+
+
+        
+class PlacesAudio(AVDataset):
+    def __init__(self, dataset_json_file, args, mode='train', transforms=None):
+        super().__init__(args, mode, transforms)
+
+        with open(os.path.expandvars(dataset_json_file), 'r') as fp:
+            data_json = json.load(fp)
+        self.data = data_json['data']
+        self.image_base_path = data_json['image_base_path']
+        self.audio_base_path = data_json['audio_base_path']
+
+        print("PlacesAudio split: {0} dataset size: {1}".format(self.mode.upper() , len(self.data)))
+
+    def __len__(self):
+        return len(self.data)
+
+    def _get_file(self, index):
+        return self.data[index]
+    
+    def _get_video(self,file):
+        return os.path.join(self.image_base_path, file['image'])
+    
+    def _get_audio(self,file):
+        return os.path.join(self.audio_base_path, file['wav'])
+    
+### ------------------------------------------------------------------------------------------------------------------
+    
 class GetAudioVideoDataset(Dataset):
 
     def __init__(self, args, mode='train', transforms=None):

@@ -13,7 +13,15 @@ def get_arguments():
     parser.add_argument('--soundnet_test_path', default='/',\
             type=str, help='soundset validation set directory' )
    
-    
+    # Added by Albert
+    parser.add_argument('--use_cuda', action='store_true', help='Use cuda')
+    parser.set_defaults(use_cuda=False)
+
+    parser.add_argument("--use_wandb", action='store_true', help='Use wandb')
+    parser.set_defaults(use_wandb=False)
+    parser.add_argument("--project_wandb", default='VG_SSL-TIE_pruebas', type=str, help='Wandb project name')
+    parser.add_argument('--placesAudio', default=None, type=str, help='Root directory path of metadata PlacesAudio')
+    ###
     parser.add_argument('--trainset', default='VGGSS', type=str, help="Training dataset")
     parser.add_argument('--training_set_scale', default='fullset', type=str, help="fullset | subset_144k , for VGGSound")
     parser.add_argument('--val_set', default='VGGSS', type=str, help='validation set: VGGSS | SoundNet')

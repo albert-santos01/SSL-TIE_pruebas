@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import sys
 from kornia.geometry.transform.affwarp import scale
@@ -15,6 +16,8 @@ from tensorboardX import SummaryWriter
 
 import torch.nn.functional as F
 import warnings
+
+import wandb
 warnings.filterwarnings("ignore")
 import numpy as np
 import random
@@ -28,7 +31,7 @@ from PIL import Image
 
 from models.model import AVENet
 
-from datasets import GetAudioVideoDataset
+from datasets import GetAudioVideoDataset, PlacesAudio
 from opts import get_arguments
 from utils.utils import AverageMeter, reverseTransform, accuracy
 import xml.etree.ElementTree as ET
@@ -174,6 +177,13 @@ def train_one_epoch(train_loader, model, criterion, optim, device, epoch, args):
             args.train_plotter.add_data('local/top5_cl', top5_meter_ts.local_avg, args.iteration)
 
         args.iteration += 1
+        ### Albert:
+        #Log batch metrics to  wandb
+        if args.use_wandb:
+            wandb.log({ "train_loss_step": loss.item(), "train_loss_cl_step": loss_cl.item(),
+                        "train_loss_cl_ts_step": loss_cl_ts.item(), 
+                        "train_loss_ts_step": loss_ts.item(), "step": wandb.run.step})
+        ### ----------------------------
 
     print('Epoch: [{0}][{1}/{2}]\t'
         'T-epoch:{t:.2f}\t'.format(epoch, idx, len(train_loader), t=time.time()-tic))
@@ -191,7 +201,13 @@ def train_one_epoch(train_loader, model, criterion, optim, device, epoch, args):
     
     args.train_logger.log('train Epoch: [{0}][{1}/{2}]\t'
                     'T-epoch:{t:.2f}\t'.format(epoch, idx, len(train_loader), t=time.time()-tic))
-
+    ### Albert:
+    if args.use_wandb:
+        wandb.log({
+                    "train_loss_epoch": losses.avg,
+                    "train_loss_cl_epoch": losses_cl.avg, "train_loss_cl_ts_epoch": losses_cl_ts.avg,
+                    "train_loss_ts_epoch": losses_ts.avg, "epoch": epoch})
+    ### ----------------------------
     return losses.avg, top1_meter.avg
 
 
@@ -226,6 +242,8 @@ def validate(val_loader, model, criterion, device, epoch, args):
             batch_time.update(time.time() - end)
             end = time.time()
 
+            ### Albert:
+            """
             img_arrs = im.data.cpu().numpy()
             heatmap_arr =  heatmap.data.cpu().numpy()
 
@@ -282,12 +300,15 @@ def validate(val_loader, model, criterion, device, epoch, args):
                 pred[pred<1] = 0
                 evaluator = Evaluator()
                 ciou, inter, union = evaluator.cal_CIOU(pred, gt_map, 0.5)
-                val_ious_meter.append(ciou)  
+                val_ious_meter.append(ciou) 
+                """
 
-
-    mean_ciou = np.sum(np.array(val_ious_meter) >= 0.5)/len(val_ious_meter)
-    auc_val = cal_auc(val_ious_meter)
-
+    # mean_ciou = np.sum(np.array(val_ious_meter) >= 0.5)/len(val_ious_meter)
+    # auc_val = cal_auc(val_ious_meter)
+    mean_ciou = 0
+    auc_val = 0
+    wandb.log({"val_loss": losses.avg, "epoch": epoch}) if args.use_wandb else None
+            ###----------------------
             
     print('Epoch: [{0}]\t Eval '
           'Loss: {loss.avg:.4f} Acc@1: {top1.avg:.4f} Acc@5: {top5.avg:.4f} MeancIoU: {ciouAvg:.4f} AUC: {auc:.4f} \t T-epoch: {t:.2f} \t'
@@ -425,17 +446,52 @@ def test(test_loader, model, criterion, device, epoch, args):
 
 
 def main(args):
-    if args.gpus is None:
-        args.gpus = str(os.environ["CUDA_VISIBLE_DEVICES"])
+    # if args.gpus is None:
+    #     args.gpus = str(os.environ["CUDA_VISIBLE_DEVICES"])
+    # else:
+    #     os.environ["CUDA_VISIBLE_DEVICES"]=str(args.gpus)
+    #     args.gpus = list(range(torch.cuda.device_count()))
+
+
+    ### Albert:
+    print("Is cuda available",torch.cuda.is_available()) 
+
+    if args.use_cuda:
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA is not available. Please run with flag --use_cuda False")
+        
+    args.gpus = list(range(torch.cuda.device_count()))
+
+    print('Using GPU:', args.gpus)
+    print('Number of CPUs:', multiprocessing.cpu_count())
+
+    # wandb initialization
+    if args.use_wandb:
+        config = dict(
+            learning_rate = args.learning_rate,
+            weight_decay = args.weight_decay,
+            batch_size = args.batch_size,
+            epochs = args.epochs,
+            dataset_mode = args.dataset_mode,
+            seed = args.seed)
+        
+        wandb.init(project= args.project_wandb, config=config)
+
+    if torch.cuda.is_available():
+        # device = torch.device('cuda:1') if len(args.gpus) > 1 else torch.device('cuda:0')
+        device = torch.device('cuda') # We are using only one GPU
     else:
-        os.environ["CUDA_VISIBLE_DEVICES"]=str(args.gpus)
-        args.gpus = list(range(torch.cuda.device_count()))
+        device = torch.device('cpu')
+        print('Using CPU')
+    ### ----------------------------
+    
 
     if args.debug:
         args.n_threads=0
 
     args.host_name = os.uname()[1]
-    device = torch.device('cuda:1') if len(args.gpus) > 1 else torch.device('cuda:0')
+
+    # device = torch.device('cuda:1') if len(args.gpus) > 1 else torch.device('cuda:0')
 
     best_acc = 0
     best_miou = 0
@@ -488,9 +544,15 @@ def main(args):
             num_workers=args.n_threads, pin_memory=True)
         
         test(test_loader, model, criterion, device, epoch, args )
+    ### Albert:
+    if args.placesAudio:
+        train_dataset = PlacesAudio(args.placesAudio + 'train.json', args,mode='train')
+        val_dataset = PlacesAudio(args.placesAudio + 'val.json', args,mode='val')
 
-        
-    train_dataset = GetAudioVideoDataset(args, mode='train')
+    else:
+        train_dataset = GetAudioVideoDataset(args, mode='train') 
+    ### ----------------------------
+    # train_dataset = GetAudioVideoDataset(args, mode='train')
     if args.dataset_mode == 'VGGSound':
         val_dataset = GetAudioVideoDataset(args, mode='test' if args.val_set == 'VGGSS' else 'val')
     elif args.dataset_mode == 'Flickr':
@@ -562,6 +624,7 @@ def main(args):
             args.eval_freq = 1
             
         if epoch % args.eval_freq == 0:
+            #TODO: Change validation
             _, val_acc, mean_ciou = validate(val_loader, model, criterion, device, epoch, args)
             is_best = mean_ciou > best_miou
             best_miou = max(mean_ciou, best_miou)
