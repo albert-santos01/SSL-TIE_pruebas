@@ -75,8 +75,10 @@ def set_path(args):
     elif args.test: 
         exp_path = os.path.dirname(os.path.dirname(args.test))
     else:
-        exp_path = 'ckpts/{args.exp_name}'.format(args=args)
-        
+        ### Albert:
+        # exp_path = 'ckpts/{args.exp_name}'.format(args=args)
+        exp_path = os.path.expandvars('$HOME/models/{args.exp_name}'.format(args=args))
+        ### ---------------------------------------------
         if not os.path.exists(exp_path):
             os.makedirs(exp_path)
 
